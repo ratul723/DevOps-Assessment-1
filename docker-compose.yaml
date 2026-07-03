@@ -1,0 +1,49 @@
+services:
+  backend:
+    build: ./backend
+    container_name: backend
+
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      DB_HOST: postgres_db
+      DB_PORT: 5432
+      POSTGRES_USER: assessment_user
+      POSTGRES_PASSWORD: secure_devops_pass
+      POSTGRES_DB: assessment_db
+
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+
+    ports:
+      - "5173:5173"
+
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+    environment:
+      VITE_API_URL: http://backend:8080
+
+    depends_on:
+      - backend
+
+  postgres_db:
+    image: postgres:17-alpine
+    container_name: postgres_db
+
+    environment:
+      - POSTGRES_USER=assessment_user
+      - POSTGRES_PASSWORD=secure_devops_pass
+      - POSTGRES_DB=assessment_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assessment_user -d assessment_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
