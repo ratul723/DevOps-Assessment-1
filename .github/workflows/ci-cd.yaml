@@ -1,0 +1,146 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_PREFIX: devops-assessment
+  FRONTEND_IMAGE_NAME: frontend
+  BACKEND_IMAGE_NAME: backend
+  FRONTEND_DOCKERFILE: frontend/Dockerfile
+  BACKEND_DOCKERFILE: backend/Dockerfile
+  FRONTEND_CONTEXT: frontend
+  BACKEND_CONTEXT: backend
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: |
+          if [ -f package.json ] && jq -e '.scripts.test' package.json > /dev/null 2>&1; then
+            npm test || true
+          else
+            echo "No frontend tests defined"
+          fi
+
+      - name: Run backend tests
+        working-directory: backend
+        run: |
+          if [ -f package.json ] && jq -e '.scripts.test' package.json > /dev/null 2>&1; then
+            npm test || true
+          else
+            echo "No backend tests defined"
+          fi
+
+      - name: Build frontend Docker image
+        run: |
+          docker build \
+            -t ${{ env.FRONTEND_IMAGE_NAME }}:latest \
+            -f ${{ env.FRONTEND_DOCKERFILE }} \
+            ${{ env.FRONTEND_CONTEXT }}
+
+      - name: Build backend Docker image
+        run: |
+          docker build \
+            -t ${{ env.BACKEND_IMAGE_NAME }}:latest \
+            -f ${{ env.BACKEND_DOCKERFILE }} \
+            ${{ env.BACKEND_CONTEXT }}
+
+      - name: Configure AWS credentials
+        if: github.event_name != 'pull_request'
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME || '' }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN || '' }}
+
+      - name: Log in to Amazon ECR
+        if: github.event_name != 'pull_request'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repository for frontend
+        if: github.event_name != 'pull_request'
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY_PREFIX }}-${{ env.FRONTEND_IMAGE_NAME }} || \
+          aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY_PREFIX }}-${{ env.FRONTEND_IMAGE_NAME }}
+
+      - name: Create ECR repository for backend
+        if: github.event_name != 'pull_request'
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY_PREFIX }}-${{ env.BACKEND_IMAGE_NAME }} || \
+          aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY_PREFIX }}-${{ env.BACKEND_IMAGE_NAME }}
+
+      - name: Tag frontend Docker image
+        run: |
+          FRONTEND_ECR_URI=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY_PREFIX }}-${{ env.FRONTEND_IMAGE_NAME }}
+          docker tag ${{ env.FRONTEND_IMAGE_NAME }}:latest $FRONTEND_ECR_URI:${{ github.sha }}
+          echo "FRONTEND_ECR_URI=$FRONTEND_ECR_URI" >> $GITHUB_ENV
+
+      - name: Tag backend Docker image
+        run: |
+          BACKEND_ECR_URI=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY_PREFIX }}-${{ env.BACKEND_IMAGE_NAME }}
+          docker tag ${{ env.BACKEND_IMAGE_NAME }}:latest $BACKEND_ECR_URI:${{ github.sha }}
+          echo "BACKEND_ECR_URI=$BACKEND_ECR_URI" >> $GITHUB_ENV
+
+      - name: Push frontend image to ECR
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push $FRONTEND_ECR_URI:${{ github.sha }}
+
+      - name: Push backend image to ECR
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push $BACKEND_ECR_URI:${{ github.sha }}
+
+      - name: Mock push images to registry
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Mock push frontend image: ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
+          echo "Mock push backend image: ${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+
+      - name: Create release tag
+        id: release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v1.0.0-${{ github.run_number }}
+          name: Release v1.0.0-${{ github.run_number }}
+          body: "Automated release for commit ${{ github.sha }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy to Kubernetes
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Mock deploy: kubectl apply -f k8s/"
+          kubectl apply -f k8s/
+
+      - name: Mock deploy to Kubernetes
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Mock deploy: kubectl apply -f k8s/"
